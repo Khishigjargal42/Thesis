@@ -1,0 +1,17 @@
+# DATA (маш чухал)
+*.zip
+*.wav
+*.npy
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Env
+pcg_env/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
