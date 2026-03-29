@@ -56,16 +56,28 @@ assert len(file_paths) > 0,  "No audio files found. Check BASE_PATH and CSV."
 assert sum(labels) > 0,      "No positive samples found. Check label column."
 
 # =========================
-# SPLIT  (train / val / test)
+# SPLIT  (70 / 15 / 15)
 # =========================
-train_paths, val_paths, train_labels, val_labels = train_test_split(
+# Step 1: carve out 15% test  →  85% temp
+temp_paths, test_paths, temp_labels, test_labels = train_test_split(
     file_paths, labels,
-    test_size=0.2,
+    test_size=0.15,
     stratify=labels,
     random_state=SEED
 )
 
-print(f"\nSplit — Train: {len(train_paths)} | Val: {len(val_paths)}")
+# Step 2: split the 85% into 70% train + 15% val  (15/85 ≈ 0.1765)
+train_paths, val_paths, train_labels, val_labels = train_test_split(
+    temp_paths, temp_labels,
+    test_size=0.1765,
+    stratify=temp_labels,
+    random_state=SEED
+)
+
+print(f"\nSplit — Train: {len(train_paths)} | Val: {len(val_paths)} | Test: {len(test_paths)}")
+print(f"  Train pos/neg : {sum(train_labels)} / {len(train_labels)-sum(train_labels)}")
+print(f"  Val   pos/neg : {sum(val_labels)}   / {len(val_labels)-sum(val_labels)}")
+print(f"  Test  pos/neg : {sum(test_labels)}  / {len(test_labels)-sum(test_labels)}")
 
 # =========================
 # DATASET
@@ -135,10 +147,13 @@ class PCGDataset(Dataset):
 # =========================
 train_ds = PCGDataset(train_paths, train_labels, augment=True)
 val_ds   = PCGDataset(val_paths,   val_labels,   augment=False)
+test_ds  = PCGDataset(test_paths,  test_labels,  augment=False)
 
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                           num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"))
 val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
+                          num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"))
+test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False,
                           num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"))
 
 # =========================
@@ -199,7 +214,7 @@ pos_weight = torch.tensor([n_neg / n_pos], dtype=torch.float32).to(DEVICE)
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", factor=0.5, patience=3, verbose=True
+    optimizer, mode="min", factor=0.5, patience=3
 )
 
 # =========================
@@ -267,19 +282,19 @@ for epoch in range(1, EPOCHS + 1):
     })
 
     print(f"  Train — Loss: {train_loss:.4f}  Acc: {train_acc:.4f}  AUC: {train_auc:.4f}")
-    print(f"  Val   — Loss: {val_loss:.4f}  Acc: {val_acc:.4f}  AUC: {val_auc:.4f}")
+    print(f"  Val   — Loss: {val_loss:.4f}  Acc: {val_acc:.4f}  AUC: {val_auc:.4f}  LR: {optimizer.param_groups[0]['lr']:.2e}")
 
     # --- checkpoint ---
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         patience_count = 0
         torch.save(model.state_dict(), "best_model.pt")
-        print(" Best model saved.")
+        print("  Best model saved.")
     else:
         patience_count += 1
-        print(f"  No improvement ({patience_count}/{PATIENCE})")
+        print(f"   No improvement ({patience_count}/{PATIENCE})")
         if patience_count >= PATIENCE:
-            print("\nEarly stopping triggered.")
+            print("\n Early stopping triggered.")
             break
 
 # =========================
@@ -289,3 +304,11 @@ print("\n" + "="*60)
 print("Training finished.")
 print(f"Best validation loss: {best_val_loss:.4f}")
 print("Best weights saved to: best_model.pt")
+
+# =========================
+# FINAL TEST EVALUATION
+# =========================
+print("\n--- Evaluating best model on held-out test set ---")
+model.load_state_dict(torch.load("best_model.pt"))
+test_loss, test_acc, test_auc = run_epoch(test_loader, train=False)
+print(f"  Test — Loss: {test_loss:.4f}  Acc: {test_acc:.4f}  AUC: {test_auc:.4f}")
