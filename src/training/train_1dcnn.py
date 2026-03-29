@@ -5,7 +5,6 @@ import torchaudio
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score
 
 # =========================
 # CONFIG
@@ -44,7 +43,7 @@ print(f"Total samples: {len(file_paths)}")
 # =========================
 # SPLIT
 # =========================
-train_paths, val_paths, train_labels, val_labels = train_test_split(
+train_paths, _, train_labels, _ = train_test_split(
     file_paths,
     labels,
     test_size=0.2,
@@ -56,11 +55,10 @@ train_paths, val_paths, train_labels, val_labels = train_test_split(
 # DATASET
 # =========================
 class PCGDataset(Dataset):
-    def __init__(self, paths, labels, train=True):
+    def __init__(self, paths, labels):
         self.paths = paths
         self.labels = labels
         self.segment_samples = TARGET_SR * SEGMENT_SEC
-        self.train = train
 
     def __len__(self):
         return len(self.paths)
@@ -92,10 +90,7 @@ class PCGDataset(Dataset):
         length = x.shape[1]
 
         if length > self.segment_samples:
-            if self.train:
-                start = torch.randint(0, length - self.segment_samples, (1,)).item()
-            else:
-                start = (length - self.segment_samples) // 2
+            start = torch.randint(0, length - self.segment_samples, (1,)).item()
             x = x[:, start:start+self.segment_samples]
         else:
             pad = self.segment_samples - length
@@ -106,11 +101,13 @@ class PCGDataset(Dataset):
 # =========================
 # DATALOADER
 # =========================
-train_ds = PCGDataset(train_paths, train_labels, train=True)
-val_ds = PCGDataset(val_paths, val_labels, train=False)
+train_ds = PCGDataset(train_paths, train_labels)
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
+train_loader = DataLoader(
+    train_ds,
+    batch_size=BATCH_SIZE,
+    shuffle=True
+)
 
 # =========================
 # MODEL
@@ -146,6 +143,7 @@ class Model1D(nn.Module):
     def forward(self, x):
         x = self.conv(x)
         x = x.squeeze(-1)
+        x = self.fc(x)
         return x
 
 model = Model1D().to(DEVICE)
@@ -162,9 +160,9 @@ criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
 # =========================
-# TRAIN
+# TRAIN LOOP ONLY
 # =========================
-def train_epoch():
+for epoch in range(EPOCHS):
     model.train()
     total_loss = 0
 
@@ -181,38 +179,8 @@ def train_epoch():
 
         total_loss += loss.item()
 
-    return total_loss / len(train_loader)
+    avg_loss = total_loss / len(train_loader)
 
-# =========================
-# EVAL
-# =========================
-def evaluate():
-    model.eval()
-    preds, targets = [], []
+    print(f"Epoch {epoch+1}/{EPOCHS} | Loss: {avg_loss:.4f}")
 
-    with torch.no_grad():
-        for x, y in val_loader:
-            x = x.to(DEVICE)
-            out = torch.sigmoid(model(x)).cpu()
-
-            preds.extend((out.numpy() > 0.5).astype(int))
-            targets.extend(y.numpy())
-
-    return f1_score(targets, preds)
-
-# =========================
-# TRAIN LOOP
-# =========================
-best_f1 = 0
-
-for epoch in range(EPOCHS):
-    loss = train_epoch()
-    f1 = evaluate()
-
-    print(f"Epoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f} | F1: {f1:.4f}")
-
-    if f1 > best_f1:
-        best_f1 = f1
-        torch.save(model.state_dict(), "best_1dcnn.pth")
-
-print("Training complete!")
+print("Training finished.")
