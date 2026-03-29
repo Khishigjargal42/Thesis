@@ -5,14 +5,12 @@ import torchaudio
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score    
-import librosa
-torchaudio.set_audio_backend("soundfile")
+from sklearn.metrics import f1_score
+
 # =========================
 # CONFIG
 # =========================
-BASE_PATH = "data/raw"
-CSV_PATH = os.path.join(BASE_PATH, "REFERENCES.csv")
+BASE_PATH = "/content/drive/MyDrive/Thesis/data/raw"
 
 BATCH_SIZE = 32
 LR = 1e-3
@@ -25,7 +23,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # =========================
 # LOAD CSV
 # =========================
-df = pd.read_csv(CSV_PATH)
+csv_path = os.path.join(BASE_PATH, "REFERENCES.csv")
+df = pd.read_csv(csv_path)
 
 file_paths = []
 labels = []
@@ -57,10 +56,11 @@ train_paths, val_paths, train_labels, val_labels = train_test_split(
 # DATASET
 # =========================
 class PCGDataset(Dataset):
-    def __init__(self, paths, labels):
+    def __init__(self, paths, labels, train=True):
         self.paths = paths
         self.labels = labels
         self.segment_samples = TARGET_SR * SEGMENT_SEC
+        self.train = train
 
     def __len__(self):
         return len(self.paths)
@@ -71,14 +71,19 @@ class PCGDataset(Dataset):
 
         waveform, sr = torchaudio.load(path)
 
+        # mono
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
+        # resample
         if sr != TARGET_SR:
             waveform = torchaudio.transforms.Resample(sr, TARGET_SR)(waveform)
 
-        waveform = waveform / (waveform.abs().max() + 1e-8)
+        # normalize
+        if waveform.abs().max() > 0:
+            waveform = waveform / waveform.abs().max()
 
+        # fix length
         waveform = self.fix_length(waveform)
 
         return waveform, torch.tensor(label, dtype=torch.float32)
@@ -87,7 +92,10 @@ class PCGDataset(Dataset):
         length = x.shape[1]
 
         if length > self.segment_samples:
-            start = torch.randint(0, length - self.segment_samples, (1,)).item()
+            if self.train:
+                start = torch.randint(0, length - self.segment_samples, (1,)).item()
+            else:
+                start = (length - self.segment_samples) // 2
             x = x[:, start:start+self.segment_samples]
         else:
             pad = self.segment_samples - length
@@ -98,8 +106,8 @@ class PCGDataset(Dataset):
 # =========================
 # DATALOADER
 # =========================
-train_ds = PCGDataset(train_paths, train_labels)
-val_ds = PCGDataset(val_paths, val_labels)
+train_ds = PCGDataset(train_paths, train_labels, train=True)
+val_ds = PCGDataset(val_paths, val_labels, train=False)
 
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
@@ -128,7 +136,12 @@ class Model1D(nn.Module):
             nn.AdaptiveAvgPool1d(1)
         )
 
-        self.fc = nn.Linear(128, 1)
+        self.fc = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, 1)
+        )
 
     def forward(self, x):
         x = self.conv(x)
@@ -140,15 +153,16 @@ model = Model1D().to(DEVICE)
 # =========================
 # LOSS + OPTIMIZER
 # =========================
-pos_weight = torch.tensor([
-    (len(train_labels) - sum(train_labels)) / (sum(train_labels) + 1e-8)
-]).to(DEVICE)
+pos_weight = torch.tensor(
+    [(len(train_labels) - sum(train_labels)) / (sum(train_labels) + 1e-8)],
+    dtype=torch.float32
+).to(DEVICE)
 
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
 # =========================
-# TRAIN FUNCTION
+# TRAIN
 # =========================
 def train_epoch():
     model.train()
@@ -170,7 +184,7 @@ def train_epoch():
     return total_loss / len(train_loader)
 
 # =========================
-# EVAL FUNCTION
+# EVAL
 # =========================
 def evaluate():
     model.eval()
