@@ -17,7 +17,7 @@ from sklearn.metrics import (
 # CONFIG  (must match train)
 # =========================
 BASE_PATH    = "/content/drive/MyDrive/Thesis/data/raw"
-MODEL_PATH   = "best_model.pt"
+MODEL_PATH = "/content/Thesis/src/training/best_model_resnet.pt"
 FIGURES_PATH = "figures"
 
 BATCH_SIZE   = 32
@@ -115,48 +115,65 @@ test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False,
 # =========================
 # MODEL  (must match train)
 # =========================
-class Model1D(nn.Module):
+class ResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_ch, out_ch, kernel_size=7,
+                               stride=stride, padding=3, bias=False)
+        self.bn1   = nn.BatchNorm1d(out_ch)
+        self.conv2 = nn.Conv1d(out_ch, out_ch, kernel_size=7,
+                               padding=3, bias=False)
+        self.bn2   = nn.BatchNorm1d(out_ch)
+        self.relu  = nn.ReLU(inplace=True)
+        self.downsample = None
+        if stride != 1 or in_ch != out_ch:
+            self.downsample = nn.Sequential(
+                nn.Conv1d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_ch)
+            )
+
+    def forward(self, x):
+        identity = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        return self.relu(out + identity)
+
+
+class ResNet1D(nn.Module):
     def __init__(self):
         super().__init__()
-
-        self.conv = nn.Sequential(
-            nn.Conv1d(1, 16, 7, padding=3),
-            nn.BatchNorm1d(16),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(16, 32, 5, padding=2),
+        self.stem = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=15, stride=2, padding=7, bias=False),
             nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(32, 64, 5, padding=2),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-
-            nn.Conv1d(64, 128, 3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-
-            nn.AdaptiveAvgPool1d(1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
         )
-
+        self.stage1 = ResBlock(32,  64,  stride=2)
+        self.stage2 = ResBlock(64,  128, stride=2)
+        self.stage3 = ResBlock(128, 256, stride=2)
+        self.stage4 = ResBlock(256, 256, stride=2)
+        self.pool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
             nn.Dropout(0.4),
-            nn.Linear(64, 1),
+            nn.Linear(128, 1)
         )
 
     def forward(self, x):
-        return self.fc(self.conv(x))
-
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+        x = self.stage4(x)
+        return self.fc(self.pool(x))
 # =========================
 # LOAD MODEL
 # =========================
-model = Model1D().to(DEVICE)
+model = ResNet1D().to(DEVICE)   # was Model1D()
 
 model.load_state_dict(
     torch.load(MODEL_PATH, map_location=DEVICE)
@@ -228,7 +245,7 @@ plt.ylabel("Actual")
 plt.title("Confusion Matrix — 1D CNN")
 plt.tight_layout()
 
-plt.savefig(os.path.join(FIGURES_PATH, "confusion_1dcnn.png"), dpi=300)
+plt.savefig(os.path.join(FIGURES_PATH, "confusion_resnet1d.png"), dpi=300)
 plt.show()
 print("Saved: figures/confusion_1dcnn.png")
 
@@ -248,6 +265,6 @@ plt.title("ROC Curve — 1D CNN")
 plt.legend(loc="lower right")
 plt.tight_layout()
 
-plt.savefig(os.path.join(FIGURES_PATH, "roc_1dcnn.png"), dpi=300)
+plt.savefig(os.path.join(FIGURES_PATH, "roc_resnet1d.png"), dpi=300)
 plt.show()
 print("Saved: figures/roc_1dcnn.png")

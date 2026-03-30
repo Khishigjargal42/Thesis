@@ -320,12 +320,12 @@ for epoch in range(1, EPOCHS + 1):
         best_val_loss = val_loss
         patience_count = 0
         torch.save(model.state_dict(), MODEL_PATH)
-        print("  ✅ Best model saved.")
+        print("  Best model saved.")
     else:
         patience_count += 1
-        print(f"  ⚠️  No improvement ({patience_count}/{PATIENCE})")
+        print(f"    No improvement ({patience_count}/{PATIENCE})")
         if patience_count >= PATIENCE:
-            print("\n🛑 Early stopping triggered.")
+            print("\n Early stopping triggered.")
             break
 
 # =========================
