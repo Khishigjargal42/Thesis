@@ -17,8 +17,8 @@ from sklearn.metrics import (
 # CONFIG  (must match train)
 # =========================
 BASE_PATH    = "/content/drive/MyDrive/Thesis/data/raw"
-MODEL_PATH = "/content/Thesis/src/training/best_model_resnet.pt"
-FIGURES_PATH = "figures"
+MODEL_PATH   = "/content/Thesis/src/training/best_model_resnet.pt"
+FIGURES_PATH = "/content/Thesis/figures"
 
 BATCH_SIZE   = 32
 TARGET_SR    = 2000
@@ -46,9 +46,8 @@ for _, row in df.iterrows():
         labels.append(int(row["label"]))
 
 # =========================
-# REPRODUCE TEST SPLIT
+# REPRODUCE TEST SPLIT  (70 / 15 / 15)
 # =========================
-# Step 1: carve out 15% test (same as training script)
 _, test_paths, _, test_labels = train_test_split(
     file_paths, labels,
     test_size=0.15,
@@ -91,7 +90,7 @@ class PCGDataset(Dataset):
         if peak > 0:
             waveform = waveform / peak
 
-        # fix length (center crop / pad — no randomness at eval)
+        # center crop / pad — no randomness at eval
         waveform = self._fix_length(waveform)
 
         return waveform, torch.tensor(self.labels[idx], dtype=torch.float32)
@@ -99,7 +98,7 @@ class PCGDataset(Dataset):
     def _fix_length(self, x):
         length = x.shape[1]
         if length > self.segment_samples:
-            start = (length - self.segment_samples) // 2   # center crop
+            start = (length - self.segment_samples) // 2
             x = x[:, start : start + self.segment_samples]
         elif length < self.segment_samples:
             x = torch.nn.functional.pad(x, (0, self.segment_samples - length))
@@ -125,6 +124,7 @@ class ResBlock(nn.Module):
                                padding=3, bias=False)
         self.bn2   = nn.BatchNorm1d(out_ch)
         self.relu  = nn.ReLU(inplace=True)
+
         self.downsample = None
         if stride != 1 or in_ch != out_ch:
             self.downsample = nn.Sequential(
@@ -154,8 +154,8 @@ class ResNet1D(nn.Module):
         self.stage2 = ResBlock(64,  128, stride=2)
         self.stage3 = ResBlock(128, 256, stride=2)
         self.stage4 = ResBlock(256, 256, stride=2)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Sequential(
+        self.pool   = nn.AdaptiveAvgPool1d(1)
+        self.fc     = nn.Sequential(
             nn.Flatten(),
             nn.Linear(256, 128),
             nn.ReLU(inplace=True),
@@ -170,13 +170,14 @@ class ResNet1D(nn.Module):
         x = self.stage3(x)
         x = self.stage4(x)
         return self.fc(self.pool(x))
+
 # =========================
 # LOAD MODEL
 # =========================
-model = ResNet1D().to(DEVICE)   # was Model1D()
+model = ResNet1D().to(DEVICE)
 
 model.load_state_dict(
-    torch.load(MODEL_PATH, map_location=DEVICE)
+    torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
 )
 
 model.eval()
@@ -204,11 +205,11 @@ with torch.no_grad():
 # =========================
 # METRICS
 # =========================
-accuracy    = accuracy_score(y_true, y_pred)
-precision   = precision_score(y_true, y_pred, zero_division=0)
-recall      = recall_score(y_true, y_pred, zero_division=0)      # = Sensitivity
-f1          = f1_score(y_true, y_pred, zero_division=0)
-auc         = roc_auc_score(y_true, y_probs)
+accuracy  = accuracy_score(y_true, y_pred)
+precision = precision_score(y_true, y_pred, zero_division=0)
+recall    = recall_score(y_true, y_pred, zero_division=0)
+f1        = f1_score(y_true, y_pred, zero_division=0)
+auc       = roc_auc_score(y_true, y_probs)
 
 tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
 sensitivity = tp / (tp + fn + 1e-8)
@@ -242,12 +243,12 @@ sns.heatmap(
 
 plt.xlabel("Predicted")
 plt.ylabel("Actual")
-plt.title("Confusion Matrix — 1D CNN")
+plt.title("Confusion Matrix — 1D ResNet")
 plt.tight_layout()
 
 plt.savefig(os.path.join(FIGURES_PATH, "confusion_resnet1d.png"), dpi=300)
 plt.show()
-print("Saved: figures/confusion_1dcnn.png")
+print("Saved: figures/confusion_resnet1d.png")
 
 # =========================
 # ROC CURVE
@@ -261,10 +262,10 @@ plt.plot([0, 1], [0, 1], color="gray", linestyle="--", lw=1)
 
 plt.xlabel("False Positive Rate")
 plt.ylabel("True Positive Rate")
-plt.title("ROC Curve — 1D CNN")
+plt.title("ROC Curve — 1D ResNet")
 plt.legend(loc="lower right")
 plt.tight_layout()
 
 plt.savefig(os.path.join(FIGURES_PATH, "roc_resnet1d.png"), dpi=300)
 plt.show()
-print("Saved: figures/roc_1dcnn.png")
+print("Saved: figures/roc_resnet1d.png")
