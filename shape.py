@@ -1,3 +1,6 @@
 import numpy as np
-X = np.load('data/normalized/X_train.npy')
-print(X.shape)  # жишээ нь (N, 128, 128) байвал зөв
+
+mfcc = np.load('data/features/mfcc.npy')
+mfcc_labels = np.load('data/features/mfcc_labels.npy')
+print(mfcc.shape)        # (N, 128, 16) байх ёстой
+print(mfcc_labels.shape) # (N,)
