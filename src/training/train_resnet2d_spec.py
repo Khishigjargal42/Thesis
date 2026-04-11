@@ -1,4 +1,6 @@
 # src/training/train_resnet2d_spec.py
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
@@ -155,7 +157,7 @@ def train_resnet2d_spec(data_dir, save_dir,
 
 if __name__ == "__main__":
     train_resnet2d_spec(
-        data_dir="/content/data",
+        data_dir="/content/drive/MyDrive/Thesis/data",
         save_dir="/content/drive/MyDrive/Thesis/models",
         epochs=30,
         batch_size=64
