@@ -1,9 +1,7 @@
 import sys
 sys.path.append("/content/Thesis/src")
 
-import os
-import numpy as np
-import torch
+import os, numpy as np, torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
@@ -11,161 +9,157 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
 # =========================
-# MODEL
+# MODEL (IMPROVED)
 # =========================
-class ParallelCNN2D(nn.Module):
-    def __init__(self):
+class ConvBlock(nn.Module):
+    def __init__(self, in_c, out_c, k, p):
         super().__init__()
-
-        self.b1 = nn.Sequential(
-            nn.Conv2d(1, 16, 3, padding=1),
-            nn.ReLU(),
+        self.net = nn.Sequential(
+            nn.Conv2d(in_c, out_c, k, padding=p, bias=False),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_c, out_c, k, padding=p, bias=False),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
             nn.MaxPool2d(2)
         )
+    def forward(self, x): return self.net(x)
 
-        self.b2 = nn.Sequential(
-            nn.Conv2d(1, 16, 5, padding=2),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
+class ParallelCNN2D(nn.Module):
+    def __init__(self, base=32, dropout=0.4):
+        super().__init__()
+        # 3 branches (multi-scale)
+        self.b1 = ConvBlock(1, base, 3, 1)
+        self.b2 = ConvBlock(1, base, 5, 2)
+        self.b3 = ConvBlock(1, base, 7, 3)
+
+        # after concat: 3*base channels
+        self.post = nn.Sequential(
+            nn.Conv2d(3*base, 2*base, 3, padding=1, bias=False),
+            nn.BatchNorm2d(2*base),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1)
         )
-
-        self.b3 = nn.Sequential(
-            nn.Conv2d(1, 16, 7, padding=3),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
-        )
-
-        self.conv = nn.Conv2d(48, 64, 3, padding=1)
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(64, 1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(2*base, 1)
 
     def forward(self, x):
-        b1 = self.b1(x)
-        b2 = self.b2(x)
-        b3 = self.b3(x)
-
-        x = torch.cat([b1, b2, b3], dim=1)
-
-        x = F.relu(self.conv(x))
-        x = self.pool(x)
-
+        x = torch.cat([self.b1(x), self.b2(x), self.b3(x)], dim=1)
+        x = self.post(x)
         x = x.view(x.size(0), -1)
+        x = self.dropout(x)
         return self.fc(x)
 
-
 # =========================
-# MAIN
+# TRAIN / EVAL
 # =========================
 def main():
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     data_dir = "/content/drive/MyDrive/Thesis/data/features"
     save_dir = "/content/drive/MyDrive/Thesis/models"
     os.makedirs(save_dir, exist_ok=True)
 
-    print("\n=== Parallel CNN + Spectrogram ===")
+    print("\n=== Parallel CNN v2 + Spectrogram ===")
 
     # LOAD
     X = np.load(os.path.join(data_dir, "spec.npy"))
     y = np.load(os.path.join(data_dir, "labels.npy"))
-
     print("Loaded:", X.shape)
 
-    # SPLIT
+    # SPLIT (same protocol)
     X_train, X_temp, y_train, y_temp = train_test_split(
         X, y, test_size=0.30, stratify=y, random_state=42)
-
     X_val, X_test, y_val, y_test = train_test_split(
         X_temp, y_temp, test_size=0.50, stratify=y_temp, random_state=42)
 
-    # NORMALIZE
+    # NORMALIZE (train stats)
     mean, std = X_train.mean(), X_train.std()
     X_train = (X_train - mean) / (std + 1e-8)
-    X_val   = (X_val - mean) / (std + 1e-8)
-    X_test  = (X_test - mean) / (std + 1e-8)
+    X_val   = (X_val   - mean) / (std + 1e-8)
+    X_test  = (X_test  - mean) / (std + 1e-8)
 
     # TENSOR
     X_train = torch.FloatTensor(X_train).unsqueeze(1)
     X_val   = torch.FloatTensor(X_val).unsqueeze(1)
     X_test  = torch.FloatTensor(X_test).unsqueeze(1)
-
     y_train = torch.FloatTensor(y_train)
     y_val   = torch.FloatTensor(y_val)
 
-    # DATALOADER
+    # LOADERS
     train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
     val_loader   = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
 
     # MODEL
-    model = ParallelCNN2D().to(device)
+    model = ParallelCNN2D(base=32, dropout=0.4).to(device)
 
-    # imbalance
+    # CLASS IMBALANCE
     n_neg = (y_train == 0).sum().item()
     n_pos = (y_train == 1).sum().item()
-    pos_weight = torch.tensor([n_neg / n_pos]).to(device)
+    pos_weight = torch.tensor([n_neg / max(n_pos,1)]).to(device)
+    print(f"pos_weight: {pos_weight.item():.2f}")
 
+    # LOSS / OPT / SCHED
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
 
-    # TRAIN
+    # TRAIN LOOP
     best_val = float("inf")
+    patience, early = 10, 0
+    save_path = os.path.join(save_dir, "parallelcnn_spec_v2.pth")
 
-    for epoch in range(20):
-
-        # TRAIN
+    for epoch in range(30):
+        # ---- TRAIN ----
         model.train()
-        train_loss = 0
-
+        train_loss = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
-
             optimizer.zero_grad()
             out = model(xb).squeeze()
             loss = criterion(out, yb)
-
             loss.backward()
             optimizer.step()
-
             train_loss += loss.item()
-
         train_loss /= len(train_loader)
 
-        # VALID
+        # ---- VAL ----
         model.eval()
-        val_loss = 0
-
+        val_loss = 0.0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 out = model(xb).squeeze()
                 val_loss += criterion(out, yb).item()
-
         val_loss /= len(val_loader)
 
-        print(f"Epoch {epoch+1} | train {train_loss:.4f} | val {val_loss:.4f}")
+        scheduler.step(val_loss)
 
-        # SAVE BEST
+        # ---- SAVE / EARLY STOP ----
         if val_loss < best_val:
             best_val = val_loss
-            torch.save(model.state_dict(),
-                       os.path.join(save_dir, "parallelcnn_spec.pth"))
+            early = 0
+            torch.save(model.state_dict(), save_path)
+            print(f"Epoch {epoch+1:2d} | train {train_loss:.4f} | val {val_loss:.4f} ✓")
+        else:
+            early += 1
+            print(f"Epoch {epoch+1:2d} | train {train_loss:.4f} | val {val_loss:.4f} | no improve ({early}/{patience})")
+            if early >= patience:
+                print(f"\n⛔ Early stopping at epoch {epoch+1}")
+                break
 
-    print("\nSaved model")
+    print(f"\nSaved best: {save_path}")
 
     # =========================
-    # TEST
+    # TEST (BATCHED)
     # =========================
-    loader = DataLoader(TensorDataset(X_test, torch.FloatTensor(y_test)),
-                        batch_size=256)
-
-    model.load_state_dict(torch.load(os.path.join(save_dir, "parallelcnn_spec.pth")))
+    test_loader = DataLoader(TensorDataset(X_test, torch.FloatTensor(y_test)), batch_size=256)
+    model.load_state_dict(torch.load(save_path, map_location=device))
     model.eval()
 
     probs_all = []
-
     with torch.no_grad():
-        for xb, _ in loader:
+        for xb, _ in test_loader:
             xb = xb.to(device)
             out = model(xb).squeeze()
             probs = torch.sigmoid(out)
@@ -174,12 +168,12 @@ def main():
     probs = np.array(probs_all)
     preds = (probs >= 0.5).astype(int)
 
-    print("\n=== TEST RESULT ===")
-    print("Accuracy:", accuracy_score(y_test, preds))
+    print("\n=== TEST RESULT (v2) ===")
+    print("Accuracy:",  accuracy_score(y_test, preds))
     print("Precision:", precision_score(y_test, preds))
-    print("Recall:", recall_score(y_test, preds))
-    print("F1:", f1_score(y_test, preds))
-    print("AUC:", roc_auc_score(y_test, probs))
+    print("Recall:",    recall_score(y_test, preds))
+    print("F1:",        f1_score(y_test, preds))
+    print("AUC:",       roc_auc_score(y_test, probs))
 
 
 if __name__ == "__main__":
