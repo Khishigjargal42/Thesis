@@ -1,35 +1,42 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                             f1_score, confusion_matrix, roc_auc_score, roc_curve)
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os
 
 # =========================
-# SELECT FEATURE
+# CONFIG
 # =========================
+FEATURE = "mel_spectrogram"
 
-FEATURE = "logmel"     #  mfcc / spec / logmel
+data_dir = "data/features"
+model_dir = "models"
+fig_dir = "figures"
+os.makedirs(fig_dir, exist_ok=True)
 
-X = np.load(f"data/features/{FEATURE}.npy")
-y = np.load(f"data/features/{FEATURE}_labels.npy")
+# =========================
+# LOAD DATA
+# =========================
+X = np.load(f"{data_dir}/{FEATURE}.npy")
+y = np.load(f"{data_dir}/labels.npy")
+
+print("Loaded:", X.shape, y.shape)
 
 X = X[:, np.newaxis, :, :]
 
 X = torch.tensor(X, dtype=torch.float32)
 y = torch.tensor(y, dtype=torch.long)
 
-dataset = TensorDataset(X, y)
-
-loader = DataLoader(dataset, batch_size=32)
+loader = DataLoader(TensorDataset(X, y), batch_size=128)
 
 # =========================
-# MODEL
+# EXACT MODEL 🔥
 # =========================
-
-class CNN(nn.Module):
-
+class HeartSoundCNN(nn.Module):
     def __init__(self):
         super().__init__()
 
@@ -42,96 +49,98 @@ class CNN(nn.Module):
             nn.ReLU(),
             nn.MaxPool2d(2),
 
-            nn.AdaptiveAvgPool2d((4,4))
+            nn.Conv2d(32,64,3,padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
         )
 
         self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(32*4*4,128),
+            nn.Linear(64*16*2,128),   # 🔥 EXACT MATCH
             nn.ReLU(),
+            nn.Dropout(0.3),
             nn.Linear(128,2)
         )
 
     def forward(self,x):
-
         x = self.conv(x)
+        x = x.view(x.size(0), -1)
         x = self.fc(x)
-
         return x
-
 
 # =========================
 # LOAD MODEL
 # =========================
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = CNN().to(device)
+model = HeartSoundCNN().to(device)
 
-model.load_state_dict(
-    torch.load(f"models/cnn_{FEATURE}.pth", map_location=device)
-)
+model_path = f"{model_dir}/cnn_{FEATURE}.pth"
+print("Loading:", model_path)
 
+model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 
 # =========================
-# PREDICTION
+# PREDICT
 # =========================
-
-y_true = []
-y_pred = []
+y_true, y_pred, y_probs = [], [], []
 
 with torch.no_grad():
+    for xb, yb in loader:
+        xb = xb.to(device)
 
-    for X_batch, y_batch in loader:
+        out = model(xb)
 
-        X_batch = X_batch.to(device)
+        probs = torch.softmax(out, dim=1)[:,1]
+        preds = torch.argmax(out, dim=1)
 
-        outputs = model(X_batch)
+        y_probs.extend(probs.cpu().numpy())
+        y_pred.extend(preds.cpu().numpy())
+        y_true.extend(yb.numpy())
 
-        preds = torch.argmax(outputs, dim=1).cpu().numpy()
-
-        y_pred.extend(preds)
-        y_true.extend(y_batch.numpy())
+y_true = np.array(y_true)
+y_pred = np.array(y_pred)
+y_probs = np.array(y_probs)
 
 # =========================
 # METRICS
 # =========================
+acc = accuracy_score(y_true, y_pred)
+prec = precision_score(y_true, y_pred, zero_division=0)
+rec = recall_score(y_true, y_pred, zero_division=0)
+f1 = f1_score(y_true, y_pred, zero_division=0)
+auc = roc_auc_score(y_true, y_probs)
 
-accuracy = accuracy_score(y_true, y_pred)
-precision = precision_score(y_true, y_pred)
-recall = recall_score(y_true, y_pred)
-f1 = f1_score(y_true, y_pred)
-
-print("\nEvaluation Results")
-print("-----------------------")
-print("Accuracy :", accuracy)
-print("Precision:", precision)
-print("Recall   :", recall)
-print("F1 Score :", f1)
+print("\n=== BASELINE CNN RESULT ===")
+print(f"Accuracy : {acc:.4f}")
+print(f"Precision: {prec:.4f}")
+print(f"Recall   : {rec:.4f}")
+print(f"F1       : {f1:.4f}")
+print(f"AUC      : {auc:.4f}")
 
 # =========================
 # CONFUSION MATRIX
 # =========================
-
 cm = confusion_matrix(y_true, y_pred)
 
-plt.figure(figsize=(5,4))
+plt.figure()
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+            xticklabels=["Normal","Abnormal"],
+            yticklabels=["Normal","Abnormal"])
 
-sns.heatmap(
-    cm,
-    annot=True,
-    fmt="d",
-    cmap="Blues",
-    xticklabels=["Normal","Abnormal"],
-    yticklabels=["Normal","Abnormal"]
-)
+plt.title(f"Confusion Matrix ({FEATURE})")
+plt.savefig(f"{fig_dir}/cm_{FEATURE}.png", dpi=300)
+plt.show()
 
-plt.xlabel("Predicted")
-plt.ylabel("Actual")
+# =========================
+# ROC CURVE
+# =========================
+fpr, tpr, _ = roc_curve(y_true, y_probs)
 
-plt.title("Confusion Matrix")
-
-plt.savefig(f"figures/confusion_{FEATURE}.png", dpi=300)
-
+plt.figure()
+plt.plot(fpr, tpr, label=f"AUC={auc:.4f}")
+plt.plot([0,1],[0,1],'--')
+plt.legend()
+plt.title(f"ROC ({FEATURE})")
+plt.savefig(f"{fig_dir}/roc_{FEATURE}.png", dpi=300)
 plt.show()
