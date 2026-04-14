@@ -89,8 +89,8 @@ def main():
     y_val   = torch.FloatTensor(y_val)
 
     # DATALOADER
-    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
-    val_loader   = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
+    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=128, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader   = DataLoader(TensorDataset(X_val, y_val), batch_size=128, num_workers=2, pin_memory=True)
 
     # MODEL
     model = ParallelCNN2D().to(device)
@@ -110,7 +110,7 @@ def main():
 
     save_path = os.path.join(save_dir, "parallelcnn_logmel_v2.pth")
 
-    for epoch in range(30):
+    for epoch in range(20):
 
         model.train()
         train_loss = 0
