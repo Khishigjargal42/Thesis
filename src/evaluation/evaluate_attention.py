@@ -131,7 +131,7 @@ with torch.no_grad():
     for xb, yb in loader:
         xb = xb.to(device)
 
-        logits = model(xb).squeeze()
+        logits = model(xb).view(-1)   # 🔥 FIX
         probs = torch.sigmoid(logits)
 
         preds = (probs >= 0.5).int()
