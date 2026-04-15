@@ -6,12 +6,19 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 
 # =========================
-# CONFIG
+# GOOGLE DRIVE MOUNT
+# =========================
+from google.colab import drive
+drive.mount('/content/drive')
+
+# =========================
+# CONFIG (🔥 UPDATED)
 # =========================
 FEATURE = "mfcc"
 
-data_dir = "data/features"
-save_dir = "models"
+data_dir = "/content/drive/MyDrive/Thesis/data/features"
+save_dir = "/content/drive/MyDrive/Thesis/models"
+
 os.makedirs(save_dir, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -121,7 +128,7 @@ class ParallelCNN_SE(nn.Module):
         self.flatten = nn.Flatten()
 
         self.fc = nn.Sequential(
-            nn.Linear(32*10*4,128),  # MFCC-д тохирсон
+            nn.Linear(32*10*4,128),  # MFCC shape
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(128,1)
@@ -165,7 +172,6 @@ save_path = os.path.join(save_dir, "parallelcnn_mfcc_attention.pth")
 
 for epoch in range(epochs):
 
-    # TRAIN
     model.train()
     train_loss = 0
 
@@ -203,7 +209,6 @@ for epoch in range(epochs):
 
     print(f"Epoch {epoch+1} | train {train_loss:.4f} | val {val_loss:.4f}")
 
-    # EARLY STOPPING
     if val_loss < best_val:
         best_val = val_loss
         counter = 0
