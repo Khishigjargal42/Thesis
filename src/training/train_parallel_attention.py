@@ -6,12 +6,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 
 # =========================
-# GOOGLE DRIVE MOUNT
-# =========================
-from google.colab import drive
-drive.mount('/content/drive')
-
-# =========================
 # CONFIG (🔥 UPDATED)
 # =========================
 FEATURE = "mfcc"
