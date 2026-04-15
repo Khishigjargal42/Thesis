@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+fig_dir = "/content/drive/MyDrive/Thesis/figures"
+os.makedirs(fig_dir, exist_ok=True)
 
 # =========================
 # CONFIG
@@ -167,7 +169,10 @@ cm = confusion_matrix(y_true, y_pred)
 
 plt.figure()
 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+
 plt.title("Confusion Matrix (Attention)")
+
+plt.savefig(f"{fig_dir}/cm_attention.png", dpi=300)
 plt.show()
 
 # =========================
@@ -178,6 +183,9 @@ fpr, tpr, _ = roc_curve(y_true, y_probs)
 plt.figure()
 plt.plot(fpr, tpr, label=f"AUC={auc:.4f}")
 plt.plot([0,1],[0,1],'--')
+
 plt.legend()
 plt.title("ROC Curve (Attention)")
+
+plt.savefig(f"{fig_dir}/roc_attention.png", dpi=300)
 plt.show()
