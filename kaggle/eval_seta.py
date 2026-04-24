@@ -53,11 +53,11 @@ SEGMENT_SEC = 2
 # ESTIMATE_STATS=True  -> Set A-аас тооцно  (approximation)
 # ESTIMATE_STATS=False -> PhysioNet train stats ашиглана (ideal)
 # ==========================================
-ESTIMATE_STATS = True
-MEL_MEAN   = 0.0
-MEL_STD    = 1.0
-MFCC_MEAN  = 0.0
-MFCC_STD   = 1.0
+ESTIMATE_STATS = False
+MEL_MEAN   = -60.82565707752085
+MEL_STD    = 21.997393560406888
+MFCC_MEAN  = -7.615565058503579
+MFCC_STD   = 83.982503151537
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
@@ -497,19 +497,18 @@ if __name__ == "__main__":
 
     # ResNet: invert=True (domain shift урвуу таамаглал засна)
     r1 = evaluate_model(
-        df, resnet_model, extract_mel,
-        mel_mean, mel_std,
-        "ResNet2D + SE Attention (Mel)",
-        invert=True
-    )
+    df, resnet_model, extract_mel,
+    0.2272, 2.7950,          # Set A estimate
+    "ResNet2D + SE Attention (Mel)",
+    invert=True
+)
 
-    # ParallelCNN: invert=False
     r2 = evaluate_model(
-        df, pcnn_model, extract_mfcc,
-        mfcc_mean, mfcc_std,
-        "ParallelCNN2D v2 (MFCC)",
-        invert=True
-    )
+    df, pcnn_model, extract_mfcc,
+    -7.616, 83.983,          # PhysioNet stats
+    "ParallelCNN2D v2 (MFCC)",
+    invert=True
+)
 
     results = [r1, r2]
 
