@@ -3,6 +3,7 @@
 *.wav
 *.npy
 data/
+circor/training_data/
 
 # Python
 __pycache__/
