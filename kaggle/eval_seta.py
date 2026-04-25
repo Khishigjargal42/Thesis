@@ -327,7 +327,7 @@ def load_set_a(csv_path, wav_dir):
     df = df[~df["label"].isin(["artifact", "unlabelled"])].copy()
     df["binary_label"] = df["label"].apply(lambda l: 0 if l == "normal" else 1)
     df["filepath"]     = df["fname"].apply(
-        lambda f: os.path.join(wav_dir, f if f.endswith(".wav") else f + ".wav")
+        lambda f: os.path.join(wav_dir, f.replace("set_a/", ""))
     )
 
     mask    = df["filepath"].apply(os.path.exists)
