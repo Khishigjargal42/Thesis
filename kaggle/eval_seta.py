@@ -39,7 +39,7 @@ from sklearn.metrics import (
 SCRIPT_DIR  = "/content/Thesis/kaggle"
 ROOT_DIR    = "/content/Thesis"
 
-SET_A_DIR   = os.path.join(SCRIPT_DIR, "set_a")
+SET_A_DIR   = SCRIPT_DIR
 SET_A_CSV   = os.path.join(SCRIPT_DIR, "set_a.csv")
 MODEL_DIR   = os.path.join(SCRIPT_DIR, "models")
 RESNET_PATH = os.path.join(MODEL_DIR, "resnet_mel_attention.pth")
@@ -346,7 +346,7 @@ def load_set_a(csv_path, wav_dir):
 
     df = df[~df["label"].isin(["artifact", "unlabelled"])].copy()
     df["binary_label"] = df["label"].apply(lambda l: 0 if l == "normal" else 1)
-    df["filepath"]     = df["fname"].apply(
+    df["filepath"] = df["fname"].apply(
         lambda f: os.path.join(wav_dir, f if f.endswith(".wav") else f + ".wav")
     )
     mask    = df["filepath"].apply(os.path.exists)
