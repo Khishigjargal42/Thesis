@@ -168,57 +168,57 @@ def load_model(model_name: str) -> ResNet2D_SE:
 # PREPROCESSING
 # ══════════════════════════════════════════════════════════════════
 def preprocess_audio(audio_input):
-    """
-    Аудио оролтыг хүлээн авч mel-spectrogram гаргана.
-    Gradio-ийн filepath (str) болон микрофон (tuple) хоёрыг зөв зохицуулна.
-    Training pipeline-тай яг адилхан параметр ашиглана.
-
-    Returns:
-        segment  : np.ndarray (4000,)         — нормчлогдоогүй waveform
-        mel_db   : np.ndarray (128, 16)       — dB масштабын mel-spec
-        tensor   : torch.Tensor (1,1,128,16)  — нормчлогдсон model input
-    """
-    # 1. Аудио унших — filepath эсвэл микрофон tuple аль ч байсан зөв авна
+    # 1. Аудио унших
     if isinstance(audio_input, tuple):
-        # Микрофон: (sample_rate, numpy_array)
         native_sr, signal = audio_input
         signal = signal.astype(np.float32)
-        # Stereo бол mono болгох
         if signal.ndim == 2:
             signal = signal.mean(axis=1)
-        # Normalize int16 -> float32 [-1, 1]
         if signal.max() > 1.0:
             signal = signal / 32768.0
-        # SR нь 2000 биш бол resample
         if native_sr != SR:
             signal = librosa.resample(signal, orig_sr=native_sr, target_sr=SR)
     else:
-        # Файл upload: filepath string
         signal, _ = librosa.load(audio_input, sr=SR, mono=True)
 
-    # 2. Эхний 4000 sample авах (2 сек), богино бол pad
-    if len(signal) >= SEGMENT_LEN:
-        segment = signal[:SEGMENT_LEN]
-    else:
-        segment = np.pad(signal, (0, SEGMENT_LEN - len(signal)))
+    # 2. Хамгийн их RMS энерги байгаа сегментийг олох
+    #    Training-д ашигласан аргатай нийцүүлэх
+    segment = get_best_segment(signal)
 
-    # 3. Mel-spectrogram — training-тай яг адилхан параметр
-    mel = librosa.feature.melspectrogram(
-        y=segment,
-        sr=SR,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS
+    # 3. Mel-spectrogram
+    mel    = librosa.feature.melspectrogram(
+        y=segment, sr=SR, n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS
     )
-    mel_db = librosa.power_to_db(mel, ref=np.max)  # shape: (128, 16)
+    mel_db = librosa.power_to_db(mel, ref=np.max)
 
-    # 4. Global normalization — training stats ашиглана
+    # 4. Normalization
     mel_norm = (mel_db - NORM_MEAN) / (NORM_STD + 1e-8)
 
-    # 5. Tensor болгох
     tensor = torch.FloatTensor(mel_norm).unsqueeze(0).unsqueeze(0).to(DEVICE)
-
     return segment, mel_db, tensor
+
+
+def get_best_segment(signal: np.ndarray) -> np.ndarray:
+    """
+    Бүтэн дохионоос хамгийн их RMS энерги бүхий
+    SEGMENT_LEN урттай хэсгийг олж буцаана.
+    Богино дохио бол zero-pad хийнэ.
+    """
+    if len(signal) <= SEGMENT_LEN:
+        return np.pad(signal, (0, SEGMENT_LEN - len(signal)))
+
+    best_start = 0
+    best_rms   = -1.0
+    step       = SEGMENT_LEN // 2  # 50% overlap
+
+    for start in range(0, len(signal) - SEGMENT_LEN + 1, step):
+        chunk = signal[start : start + SEGMENT_LEN]
+        rms   = float(np.sqrt(np.mean(chunk ** 2)))
+        if rms > best_rms:
+            best_rms   = rms
+            best_start = start
+
+    return signal[best_start : best_start + SEGMENT_LEN]
 
 
 # ══════════════════════════════════════════════════════════════════
