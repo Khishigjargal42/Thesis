@@ -181,45 +181,47 @@ def preprocess_audio(audio_input):
     else:
         signal, _ = librosa.load(audio_input, sr=SR, mono=True)
 
-    # 2. Хамгийн их RMS энерги байгаа сегментийг олох
-    #    Training-д ашигласан аргатай нийцүүлэх
-    segment = get_best_segment(signal)
+    # 2. ЧУХАЛ: X.npy-тай адил [-1, 1] normalize хийх
+    max_val = np.abs(signal).max()
+    if max_val > 0:
+        signal = signal / max_val
 
-    # 3. Mel-spectrogram
+    # 3. Сегмент авах — дунд хэсгээс (чимээгүй эхлэл, төгсгөлийг хасна)
+    signal = get_best_segment(signal)
+
+    # 4. Mel-spectrogram
     mel    = librosa.feature.melspectrogram(
-        y=segment, sr=SR, n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS
+        y=signal, sr=SR, n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS
     )
     mel_db = librosa.power_to_db(mel, ref=np.max)
 
-    # 4. Normalization
+    # 5. Global normalization
     mel_norm = (mel_db - NORM_MEAN) / (NORM_STD + 1e-8)
 
     tensor = torch.FloatTensor(mel_norm).unsqueeze(0).unsqueeze(0).to(DEVICE)
-    return segment, mel_db, tensor
+    return signal, mel_db, tensor
 
 
 def get_best_segment(signal: np.ndarray) -> np.ndarray:
     """
-    Бүтэн дохионоос хамгийн их RMS энерги бүхий
-    SEGMENT_LEN урттай хэсгийг олж буцаана.
-    Богино дохио бол zero-pad хийнэ.
+    Хамгийн их RMS энерги бүхий SEGMENT_LEN урттай хэсгийг буцаана.
+    X.npy үүсгэхдээ чимээгүй хэсгүүдийг хассантай нийцүүлнэ.
     """
     if len(signal) <= SEGMENT_LEN:
         return np.pad(signal, (0, SEGMENT_LEN - len(signal)))
 
     best_start = 0
     best_rms   = -1.0
-    step       = SEGMENT_LEN // 2  # 50% overlap
+    step       = SEGMENT_LEN // 4  # 25% алхам — нарийн хайлт
 
     for start in range(0, len(signal) - SEGMENT_LEN + 1, step):
-        chunk = signal[start : start + SEGMENT_LEN]
+        chunk = signal[start: start + SEGMENT_LEN]
         rms   = float(np.sqrt(np.mean(chunk ** 2)))
         if rms > best_rms:
             best_rms   = rms
             best_start = start
 
-    return signal[best_start : best_start + SEGMENT_LEN]
-
+    return signal[best_start: best_start + SEGMENT_LEN]
 
 # ══════════════════════════════════════════════════════════════════
 # VISUALIZATION ФУНКЦҮҮД
@@ -347,7 +349,7 @@ def predict(audio_input, model_name: str):
 
         prob_abn = float(torch.sigmoid(torch.tensor(logit)))
         prob_nor = 1.0 - prob_abn
-        abnormal = prob_abn >= 0.5
+        abnormal = prob_abn >= 0.3
 
         # 4. Plots
         fig_wave    = plot_waveform(waveform)
