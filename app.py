@@ -28,14 +28,14 @@ N_MELS       = 128
 DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Training set normalization stats — thesis Table 2.3-аас
-NORM_MEAN    = -60.84
-NORM_STD     = 21.99
+NORM_MEAN = -60.8257
+NORM_STD  = 21.9974
 
 # ══════════════════════════════════════════════════════════════════
 # MODEL PATHS — өөрийн Drive замаар солино уу
 # ══════════════════════════════════════════════════════════════════
 MODEL_PATHS = {
-    "ResNet2D + Mel + SE Attention (Шилдэг)": "models/resnet_mel_attention.pth",
+    "ResNet2D + Mel + SE Attention (Шилдэг)": "models/resnet_mel_attention_v2.pth",
     "ResNet2D + Mel-Spectrogram":             "models/resnet2d_mel_spectrogram.pth",
     "ResNet2D + Mel (v2)":                    "models/resnet2d_mel.pth",
 }
