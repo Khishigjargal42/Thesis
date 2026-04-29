@@ -167,9 +167,10 @@ def load_model(model_name: str) -> ResNet2D_SE:
 # ══════════════════════════════════════════════════════════════════
 # PREPROCESSING
 # ══════════════════════════════════════════════════════════════════
-def preprocess_audio(audio_path: str):
+def preprocess_audio(audio_input):
     """
-    .wav файлыг уншиж mel-spectrogram гаргана.
+    Аудио оролтыг хүлээн авч mel-spectrogram гаргана.
+    Gradio-ийн filepath (str) болон микрофон (tuple) хоёрыг зөв зохицуулна.
     Training pipeline-тай яг адилхан параметр ашиглана.
 
     Returns:
@@ -177,8 +178,23 @@ def preprocess_audio(audio_path: str):
         mel_db   : np.ndarray (128, 16)       — dB масштабын mel-spec
         tensor   : torch.Tensor (1,1,128,16)  — нормчлогдсон model input
     """
-    # 1. Аудио унших + SR=2000 руу resample
-    signal, _ = librosa.load(audio_path, sr=SR, mono=True)
+    # 1. Аудио унших — filepath эсвэл микрофон tuple аль ч байсан зөв авна
+    if isinstance(audio_input, tuple):
+        # Микрофон: (sample_rate, numpy_array)
+        native_sr, signal = audio_input
+        signal = signal.astype(np.float32)
+        # Stereo бол mono болгох
+        if signal.ndim == 2:
+            signal = signal.mean(axis=1)
+        # Normalize int16 -> float32 [-1, 1]
+        if signal.max() > 1.0:
+            signal = signal / 32768.0
+        # SR нь 2000 биш бол resample
+        if native_sr != SR:
+            signal = librosa.resample(signal, orig_sr=native_sr, target_sr=SR)
+    else:
+        # Файл upload: filepath string
+        signal, _ = librosa.load(audio_input, sr=SR, mono=True)
 
     # 2. Эхний 4000 sample авах (2 сек), богино бол pad
     if len(signal) >= SEGMENT_LEN:
@@ -261,11 +277,11 @@ def plot_se_attention(weights: np.ndarray) -> plt.Figure:
 def plot_metrics_card() -> plt.Figure:
     """Загварын test set гүйцэтгэлийн хүснэгт."""
     metrics = {
-        "Accuracy":  0.9115,
-        "Precision": 0.7438,
-        "Recall":    0.9516,
-        "F1-Score":  0.8350,
-        "AUC-ROC":   0.9744,
+        "Accuracy":  0.9193,
+        "Precision": 0.8431,
+        "Recall":    0.8778,
+        "F1-Score":  0.8598,
+        "AUC-ROC":   0.9804,
     }
     fig, ax = plt.subplots(figsize=(9, 2.2))
     ax.axis("off")
@@ -303,10 +319,10 @@ def plot_metrics_card() -> plt.Figure:
 # ══════════════════════════════════════════════════════════════════
 # ҮНДСЭН PREDICT ФУНКЦ
 # ══════════════════════════════════════════════════════════════════
-def predict(audio_path: str, model_name: str):
+def predict(audio_input, model_name: str):
     """
     Inputs:
-        audio_path  : gr.Audio filepath
+        audio_input : gr.Audio — filepath (str) эсвэл микрофон (tuple)
         model_name  : dropdown сонголт
 
     Outputs (7):
@@ -315,15 +331,15 @@ def predict(audio_path: str, model_name: str):
     """
     EMPTY = (None, None, None, None, {}, "N/A", "N/A")
 
-    if audio_path is None:
+    if audio_input is None:
         return EMPTY
 
     try:
         # 1. Model ачаалах (cache ашиглана)
         model = load_model(model_name)
 
-        # 2. Preprocessing
-        waveform, mel_db, tensor = preprocess_audio(audio_path)
+        # 2. Preprocessing — filepath эсвэл tuple аль ч байсан зөв ажиллана
+        waveform, mel_db, tensor = preprocess_audio(audio_input)
 
         # 3. Inference
         with torch.no_grad():
@@ -401,7 +417,7 @@ with gr.Blocks(
                 choices=list(MODEL_PATHS.keys()),
                 value=list(MODEL_PATHS.keys())[0],
                 label="🧠 Model сонгох",
-                info="Шилдэг: ResNet2D + Mel + SE Attention (F1: 0.835, AUC: 0.974)"
+                info="Шилдэг: ResNet2D + Mel + SE Attention (F1: 0.860, AUC: 0.980)"
             )
             predict_btn = gr.Button("🔍 Шинжлэх", variant="primary", size="lg")
             gr.Markdown("""
@@ -463,7 +479,7 @@ with gr.Blocks(
     ---
     <div style='text-align:center; color:#888; font-size:12px;'>
     Компьютрын Ухааны Тэнхим | МКУТ | 2026 &nbsp;|&nbsp;
-    Accuracy: 91.15% &nbsp;|&nbsp; F1: 83.50% &nbsp;|&nbsp; AUC: 97.44% &nbsp;|&nbsp; Recall: 95.16%
+    Accuracy: 91.93% &nbsp;|&nbsp; F1: 85.98% &nbsp;|&nbsp; AUC: 98.04% &nbsp;|&nbsp; Recall: 87.78%
     </div>
     """)
 
