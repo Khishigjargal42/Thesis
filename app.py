@@ -3,14 +3,14 @@ PCG Heart Sound Classifier - Gradio Demo
 ResNet2D + SE Attention + Mel-Spectrogram
 
 Features:
-  - Raw wav inference (unseen recordings supported)
-  - Input quality validation before inference
+  - Multi-segment aggregation (all segments averaged)
+  - 5-stage input quality validation with detailed report
+  - Grad-CAM on highest-prob_abn segment
   - SE Attention channel visualization
-  - Grad-CAM temporal-frequency heatmap
-  - Optimized classification threshold (0.35)
+  - Tabbed UI with pre-upload guidance popup
+  - Classification threshold optimized at 0.35
 
-Author: Г.Хишигжаргал
-Bachelor Thesis, 2026
+Author: Г.Хишигжаргал, Bachelor Thesis 2026
 """
 
 import os
@@ -39,7 +39,7 @@ N_MELS     = 128
 
 NORM_MEAN  = -48.6446
 NORM_STD   = 16.0562
-THRESHOLD  = 0.35   # Optimized for recall in clinical screening
+THRESHOLD  = 0.35
 
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -117,14 +117,12 @@ class ResNet2D_SE(nn.Module):
 # LOAD MODEL
 # ══════════════════════════════════════════════════════════════════
 print(f"Device: {DEVICE}")
-
 model = ResNet2D_SE()
 model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
 model.to(DEVICE)
 model.eval()
 print(f"Model loaded: {MODEL_PATH}")
 
-# SE Attention hook — captures layer3 channel weights
 _se_weights = {}
 
 def _se_hook(module, input, output):
@@ -137,50 +135,79 @@ model.layer3.se.register_forward_hook(_se_hook)
 
 
 # ══════════════════════════════════════════════════════════════════
-# AUDIO QUALITY CHECK  — must be defined before predict()
+# AUDIO QUALITY CHECK
 # ══════════════════════════════════════════════════════════════════
 def check_audio_quality(signal: np.ndarray) -> tuple:
     """
-    Validates raw signal quality before any preprocessing.
-    Runs 5 checks in order of increasing cost.
-    Returns: (is_valid: bool, message: str)
+    5-stage quality validation on raw signal before any preprocessing.
+    Returns: (is_valid: bool, report: list of (passed, check_name, detail))
     """
-    # 1. Minimum duration
-    if len(signal) < SR * 1:
-        return False, "⚠️ Recording too short. Minimum 2 seconds required."
+    report = []
 
-    # 2. RMS energy — catches silent files
-    rms = np.sqrt(np.mean(signal ** 2))
+    # 1. Duration
+    duration = len(signal) / SR
+    if duration < 2.0:
+        report.append((False, "Duration", f"{duration:.1f}s — minimum 2.0s required"))
+        return False, report
+    else:
+        report.append((True, "Duration", f"{duration:.1f}s"))
+
+    # 2. RMS energy
+    rms = float(np.sqrt(np.mean(signal ** 2)))
     if rms < 0.0005:
-        return False, "⚠️ Signal too quiet. Check stethoscope placement or microphone gain."
+        report.append((False, "Signal Energy", f"RMS={rms:.5f} — too quiet, minimum 0.0005"))
+        return False, report
+    else:
+        report.append((True, "Signal Energy", f"RMS={rms:.5f}"))
 
-    # 3. Clipping — catches gain overload
-    clip_ratio = (np.abs(signal) > 0.99).mean()
+    # 3. Clipping
+    clip_ratio = float((np.abs(signal) > 0.99).mean())
     if clip_ratio > 0.005:
-        return False, "⚠️ Audio clipping detected. Reduce recording level."
+        report.append((False, "Clipping", f"{clip_ratio*100:.2f}% samples clipped — maximum 0.5%"))
+        return False, report
+    else:
+        report.append((True, "Clipping", f"{clip_ratio*100:.3f}% clipped"))
 
-    # 4. Near-constant signal — catches DC offset or silent files
-    if np.std(signal) < 0.0005:
-        return False, "⚠️ Signal is near-constant. This does not appear to be a PCG recording."
+    # 4. Signal variance
+    std = float(np.std(signal))
+    if std < 0.0005:
+        report.append((False, "Variance", f"std={std:.5f} — signal is near-constant"))
+        return False, report
+    else:
+        report.append((True, "Variance", f"std={std:.5f}"))
 
-    # 5. Frequency content — heart sounds concentrate in 20-200 Hz
+    # 5. Cardiac frequency content (20-200 Hz)
     seg          = signal[:min(len(signal), SR * 5)]
     fft          = np.abs(np.fft.rfft(seg))
-    freqs        = np.fft.rfftfreq(len(seg), 1 / SR)
-    heart_energy = fft[(freqs >= 20) & (freqs <= 200)].sum()
-    total_energy = fft.sum() + 1e-8
+    freqs        = np.fft.rfftfreq(len(seg), 1.0 / SR)
+    heart_energy = float(fft[(freqs >= 20) & (freqs <= 200)].sum())
+    total_energy = float(fft.sum()) + 1e-8
+    heart_ratio  = heart_energy / total_energy
+    if heart_ratio < 0.05:
+        report.append((False, "Cardiac Frequency (20-200 Hz)",
+                       f"{heart_ratio*100:.1f}% — minimum 5% required. Not a PCG recording?"))
+        return False, report
+    else:
+        report.append((True, "Cardiac Frequency (20-200 Hz)",
+                       f"{heart_ratio*100:.1f}% energy in cardiac band"))
 
-    if (heart_energy / total_energy) < 0.05:
-        return False, "⚠️ No cardiac frequency content detected (20-200 Hz). Please use a PCG/stethoscope recording."
+    return True, report
 
-    return True, "✅ Audio quality acceptable."
+
+def format_quality_report(report: list) -> str:
+    """Formats quality check results as readable text."""
+    lines = ["**Input Quality Report**\n"]
+    for passed, name, detail in report:
+        icon = "✅" if passed else "❌"
+        lines.append(f"{icon} **{name}**: {detail}")
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════
-# PREPROCESSING
+# SIGNAL LOADING
 # ══════════════════════════════════════════════════════════════════
 def load_signal(audio_input) -> np.ndarray:
-    """Loads audio from filepath or Gradio microphone tuple."""
+    """Loads and normalizes audio from filepath or Gradio tuple."""
     if isinstance(audio_input, tuple):
         native_sr, signal = audio_input
         signal = signal.astype(np.float32)
@@ -195,39 +222,28 @@ def load_signal(audio_input) -> np.ndarray:
     return signal
 
 
-def preprocess(signal: np.ndarray) -> tuple:
-    """
-    Converts raw signal to normalized mel-spectrogram tensor.
-
-    Pipeline matches training exactly:
-      1. Step=2000 overlap segmentation
-      2. Highest-RMS segment selection
-      3. Mel-spectrogram (128x16)
-      4. z-score normalization with train stats
-
-    Returns: (segment, mel_db, tensor)
-    """
-    # Overlap segments
+# ══════════════════════════════════════════════════════════════════
+# SEGMENTATION + FEATURE EXTRACTION
+# ══════════════════════════════════════════════════════════════════
+def get_all_segments(signal: np.ndarray) -> list:
+    """Returns all 50%-overlap 2-second segments from the signal."""
     segments = []
     for start in range(0, len(signal) - SEG + 1, STEP):
         segments.append(signal[start:start + SEG])
     if not segments:
         segments = [np.pad(signal, (0, SEG - len(signal)))]
+    return segments
 
-    # Best segment by RMS
-    rms_vals = [np.sqrt(np.mean(s ** 2)) for s in segments]
-    segment  = segments[int(np.argmax(rms_vals))]
 
-    # Mel-spectrogram
+def segment_to_tensor(seg: np.ndarray) -> tuple:
+    """Converts a segment to mel_db and normalized tensor."""
     mel    = librosa.feature.melspectrogram(
-        y=segment, sr=SR,
-        n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS
+        y=seg, sr=SR, n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS
     )
     mel_db   = librosa.power_to_db(mel, ref=np.max)
     mel_norm = (mel_db - NORM_MEAN) / (NORM_STD + 1e-8)
     tensor   = torch.FloatTensor(mel_norm).unsqueeze(0).unsqueeze(0).to(DEVICE)
-
-    return segment, mel_db, tensor
+    return mel_db, tensor
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -235,59 +251,40 @@ def preprocess(signal: np.ndarray) -> tuple:
 # ══════════════════════════════════════════════════════════════════
 def compute_gradcam(tensor: torch.Tensor) -> np.ndarray:
     """
-    Computes Grad-CAM heatmap over the mel-spectrogram input.
-
-    Targets layer3 feature maps — the last spatial layer before
-    global average pooling. Gradient of the abnormality logit
-    w.r.t. layer3 activations gives per-channel importance weights.
-    The weighted sum of activations is upsampled to (128, 16) and
-    overlaid on the mel-spectrogram.
-
-    Returns: heatmap np.ndarray (128, 16), values in [0, 1]
+    Grad-CAM on layer3. Returns heatmap (128, 16) normalized to [0,1].
+    Targets the abnormality logit — red regions indicate where the
+    model found evidence of cardiac abnormality.
     """
     tensor = tensor.clone().requires_grad_(True)
+    activations, gradients = {}, {}
 
-    # Forward pass with gradient tracking
-    activations = {}
-    gradients   = {}
+    def fwd_hook(m, i, o):
+        activations["l3"] = o
 
-    def fwd_hook(module, input, output):
-        activations["layer3"] = output
+    def bwd_hook(m, gi, go):
+        gradients["l3"] = go[0]
 
-    def bwd_hook(module, grad_in, grad_out):
-        gradients["layer3"] = grad_out[0]
-
-    fwd_handle = model.layer3.register_forward_hook(fwd_hook)
-    bwd_handle = model.layer3.register_full_backward_hook(bwd_hook)
+    fh = model.layer3.register_forward_hook(fwd_hook)
+    bh = model.layer3.register_full_backward_hook(bwd_hook)
 
     model.zero_grad()
-    logit = model(tensor)
-    logit.backward()
+    model(tensor).backward()
 
-    fwd_handle.remove()
-    bwd_handle.remove()
+    fh.remove()
+    bh.remove()
 
-    # Grad-CAM computation
-    acts  = activations["layer3"].squeeze(0)   # (128, H, W)
-    grads = gradients["layer3"].squeeze(0)     # (128, H, W)
+    acts  = activations["l3"].squeeze(0)
+    grads = gradients["l3"].squeeze(0)
+    weights = grads.mean(dim=(1, 2))
 
-    # Global average pool gradients to get channel weights
-    weights = grads.mean(dim=(1, 2))           # (128,)
-
-    # Weighted sum of activation maps
     cam = torch.zeros(acts.shape[1:], device=DEVICE)
     for i, w in enumerate(weights):
         cam += w * acts[i]
 
-    # ReLU — keep only positive contributions
-    cam = F.relu(cam)
-
-    # Upsample to input mel size (128, 16)
-    cam = cam.unsqueeze(0).unsqueeze(0)
+    cam = F.relu(cam).unsqueeze(0).unsqueeze(0)
     cam = F.interpolate(cam, size=(N_MELS, 16), mode="bilinear", align_corners=False)
     cam = cam.squeeze().detach().cpu().numpy()
 
-    # Normalize to [0, 1]
     if cam.max() > cam.min():
         cam = (cam - cam.min()) / (cam.max() - cam.min())
     else:
@@ -299,23 +296,24 @@ def compute_gradcam(tensor: torch.Tensor) -> np.ndarray:
 # ══════════════════════════════════════════════════════════════════
 # VISUALIZATION
 # ══════════════════════════════════════════════════════════════════
-def plot_waveform(segment: np.ndarray) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(8, 2.5))
+def plot_waveform(segment: np.ndarray, title: str = "") -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(9, 2.8))
     t = np.arange(len(segment)) / SR
-    ax.plot(t, segment, color="#1565C0", linewidth=0.8, alpha=0.9)
-    ax.fill_between(t, segment, alpha=0.12, color="#1565C0")
-    ax.axhline(0, color="gray", linewidth=0.4, linestyle="--")
+    ax.plot(t, segment, color="#2563EB", linewidth=0.9, alpha=0.9)
+    ax.fill_between(t, segment, alpha=0.10, color="#2563EB")
+    ax.axhline(0, color="#94A3B8", linewidth=0.5, linestyle="--")
     ax.set_xlabel("Time (seconds)", fontsize=11)
     ax.set_ylabel("Amplitude", fontsize=11)
-    ax.set_title("PCG Waveform — Highest RMS Segment", fontsize=12, fontweight="bold")
+    ax.set_title(title or "PCG Waveform — Highest RMS Segment", fontsize=12, fontweight="bold")
     ax.set_xlim(0, len(segment) / SR)
-    ax.grid(axis="y", alpha=0.25)
+    ax.grid(axis="y", alpha=0.2)
+    ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     return fig
 
 
-def plot_mel(mel_db: np.ndarray) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(8, 4))
+def plot_mel(mel_db: np.ndarray, title: str = "") -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(9, 4))
     img = ax.imshow(
         mel_db, aspect="auto", origin="lower",
         cmap="magma", interpolation="nearest"
@@ -323,53 +321,50 @@ def plot_mel(mel_db: np.ndarray) -> plt.Figure:
     plt.colorbar(img, ax=ax, label="dB")
     ax.set_xlabel("Time Frame", fontsize=11)
     ax.set_ylabel("Mel Filter Bank", fontsize=11)
-    ax.set_title("Mel-Spectrogram (128 × 16) — Model Input", fontsize=12, fontweight="bold")
+    ax.set_title(title or "Mel-Spectrogram (128 × 16) — Model Input", fontsize=12, fontweight="bold")
     fig.tight_layout()
     return fig
 
 
-def plot_gradcam(mel_db: np.ndarray, cam: np.ndarray) -> plt.Figure:
-    """
-    Overlays Grad-CAM heatmap on mel-spectrogram.
-    Highlights regions (frequency x time) that drove the classification.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+def plot_gradcam(mel_db: np.ndarray, cam: np.ndarray, prob: float) -> plt.Figure:
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
 
-    # Left: raw mel
     axes[0].imshow(mel_db, aspect="auto", origin="lower", cmap="magma")
-    axes[0].set_title("Mel-Spectrogram", fontsize=11, fontweight="bold")
+    axes[0].set_title("Mel-Spectrogram\n(Highest Abnormality Segment)", fontsize=11, fontweight="bold")
     axes[0].set_xlabel("Time Frame")
     axes[0].set_ylabel("Mel Filter Bank")
 
-    # Right: mel + Grad-CAM overlay
-    axes[1].imshow(mel_db, aspect="auto", origin="lower", cmap="magma", alpha=0.6)
-    axes[1].imshow(cam, aspect="auto", origin="lower", cmap="jet", alpha=0.5,
+    axes[1].imshow(mel_db, aspect="auto", origin="lower", cmap="magma", alpha=0.55)
+    axes[1].imshow(cam,    aspect="auto", origin="lower", cmap="jet",   alpha=0.5,
                    vmin=0, vmax=1)
-    axes[1].set_title("Grad-CAM Overlay\n(Red = most discriminative region)", fontsize=11, fontweight="bold")
+    axes[1].set_title(
+        f"Grad-CAM Overlay  (prob_abn={prob:.3f})\nRed = most discriminative region",
+        fontsize=11, fontweight="bold"
+    )
     axes[1].set_xlabel("Time Frame")
     axes[1].set_ylabel("Mel Filter Bank")
 
-    fig.suptitle("Temporal-Frequency Attention (Grad-CAM)", fontsize=13, fontweight="bold")
+    fig.suptitle("Temporal-Frequency Interpretability (Grad-CAM)", fontsize=13, fontweight="bold")
     fig.tight_layout()
     return fig
 
 
 def plot_se_attention(weights: np.ndarray) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(10, 3))
+    fig, ax = plt.subplots(figsize=(11, 3))
     top_k   = 20
     top_idx = set(np.argsort(weights)[-top_k:])
-    colors  = ["#E53935" if i in top_idx else "#90CAF9"
-               for i in range(len(weights))]
+    colors  = ["#DC2626" if i in top_idx else "#93C5FD" for i in range(len(weights))]
     ax.bar(range(len(weights)), weights, color=colors, width=1.0, edgecolor="none")
-    ax.set_xlabel("Channel Index (128 channels)", fontsize=11)
-    ax.set_ylabel("SE Attention Weight", fontsize=11)
+    ax.set_xlabel("Channel Index (128 mel channels)", fontsize=11)
+    ax.set_ylabel("Attention Weight", fontsize=11)
     ax.set_title(
-        "SE Attention Weights — Layer 3\nRed: Top-20 most active frequency channels",
+        "SE Channel Attention — Layer 3\nRed: Top-20 most active frequency channels",
         fontsize=12, fontweight="bold"
     )
     ax.set_xlim(-1, len(weights))
     ax.set_ylim(0, 1.05)
-    ax.grid(axis="y", alpha=0.25)
+    ax.grid(axis="y", alpha=0.2)
+    ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     return fig
 
@@ -387,23 +382,45 @@ def plot_metrics() -> plt.Figure:
     table = ax.table(
         cellText=[[f"{v:.4f}" for v in metrics.values()]],
         colLabels=list(metrics.keys()),
-        loc="center",
-        cellLoc="center"
+        loc="center", cellLoc="center"
     )
     table.auto_set_font_size(False)
     table.set_fontsize(13)
-    table.scale(1.2, 2.4)
+    table.scale(1.2, 2.5)
     for (row, col), cell in table.get_celld().items():
         if row == 0:
-            cell.set_facecolor("#1565C0")
+            cell.set_facecolor("#1D4ED8")
             cell.set_text_props(color="white", fontweight="bold")
         else:
-            cell.set_facecolor("#E3F2FD")
+            cell.set_facecolor("#EFF6FF")
             cell.set_text_props(fontweight="bold")
     ax.set_title(
-        "ResNet2D + SE Attention + Mel-Spectrogram — Test Set Performance",
+        "ResNet2D + SE Attention — Test Set Performance  (threshold=0.35)",
         fontsize=12, fontweight="bold", pad=14
     )
+    fig.tight_layout()
+    return fig
+
+
+def plot_quality_fail(report: list) -> plt.Figure:
+    """Visual quality report shown when input fails validation."""
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    ax.axis("off")
+
+    lines = []
+    for passed, name, detail in report:
+        icon = "✅" if passed else "❌"
+        lines.append(f"{icon}  {name}: {detail}")
+
+    text = "\n".join(lines)
+    ax.text(
+        0.05, 0.95, text,
+        transform=ax.transAxes,
+        fontsize=12, verticalalignment="top",
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.6", facecolor="#FEF2F2", edgecolor="#DC2626", linewidth=2)
+    )
+    ax.set_title("Input Quality Validation Report", fontsize=13, fontweight="bold", color="#DC2626")
     fig.tight_layout()
     return fig
 
@@ -412,162 +429,274 @@ def plot_metrics() -> plt.Figure:
 # PREDICT
 # ══════════════════════════════════════════════════════════════════
 def predict(audio_input):
-    EMPTY = (None, None, None, None, None, {}, "N/A", "N/A")
+    """
+    Full inference pipeline:
+      1. Load signal
+      2. Quality check (5 stages) — stop if failed
+      3. Segment all overlapping windows
+      4. Inference on every segment → average probability
+      5. Grad-CAM on highest-prob_abn segment
+      6. Visualization on highest-RMS segment
+
+    Returns 10 outputs for Gradio components.
+    """
+    EMPTY = (None, None, None, None, None, None, {}, "N/A", "N/A", "")
 
     if audio_input is None:
         return EMPTY
 
     try:
-        # 1. Load raw signal
+        # 1. Load
         signal = load_signal(audio_input)
 
-        # 2. Quality check on raw signal — BEFORE any preprocessing
-        is_valid, quality_msg = check_audio_quality(signal)
+        # 2. Quality check
+        is_valid, report = check_audio_quality(signal)
+        quality_text = format_quality_report(report)
+
         if not is_valid:
+            fail_fig = plot_quality_fail(report)
             return (
+                fail_fig,   # quality report figure in Tab 1
                 None, None, None, None, None,
-                {"⚠️ Quality Issue": 1.0},
-                "N/A",
-                quality_msg
+                {"❌ Invalid Input — Check Quality Report": 1.0},
+                "N/A", "N/A",
+                quality_text
             )
 
-        # 3. Preprocessing
-        segment, mel_db, tensor = preprocess(signal)
+        # 3. All segments
+        segments = get_all_segments(signal)
+        n_segs   = len(segments)
 
-        # 4. Inference
-        with torch.no_grad():
-            logit = model(tensor).squeeze().item()
+        # 4. Inference on all segments
+        all_probs  = []
+        all_mel_db = []
+        all_rms    = []
 
-        prob_abn = float(torch.sigmoid(torch.tensor(logit)))
-        prob_nor = 1.0 - prob_abn
-        abnormal = prob_abn >= THRESHOLD
+        for seg in segments:
+            mel_db, tensor = segment_to_tensor(seg)
+            with torch.no_grad():
+                logit = model(tensor).squeeze().item()
+            prob = float(torch.sigmoid(torch.tensor(logit)))
+            all_probs.append(prob)
+            all_mel_db.append(mel_db)
+            all_rms.append(float(np.sqrt(np.mean(seg ** 2))))
 
-        # 5. Grad-CAM — requires gradient, run separately
-        cam = compute_gradcam(tensor)
+        # Final probability = mean of all segments
+        final_prob = float(np.mean(all_probs))
+        abnormal   = final_prob >= THRESHOLD
 
-        # 6. Plots
-        fig_wave    = plot_waveform(segment)
-        fig_mel     = plot_mel(mel_db)
-        fig_gradcam = plot_gradcam(mel_db, cam)
+        # 5. Grad-CAM — on highest prob_abn segment
+        best_prob_idx    = int(np.argmax(all_probs))
+        _, gradcam_tensor = segment_to_tensor(segments[best_prob_idx])
+        cam = compute_gradcam(gradcam_tensor)
+
+        # 6. Visualization — on highest RMS segment
+        best_rms_idx = int(np.argmax(all_rms))
+        viz_segment  = segments[best_rms_idx]
+        viz_mel_db   = all_mel_db[best_rms_idx]
+
+        # Plots
+        fig_wave    = plot_waveform(viz_segment,
+                                    f"PCG Waveform — Best RMS Segment ({best_rms_idx+1}/{n_segs})")
+        fig_mel     = plot_mel(viz_mel_db,
+                               f"Mel-Spectrogram — Best RMS Segment ({best_rms_idx+1}/{n_segs})")
+        fig_gradcam = plot_gradcam(all_mel_db[best_prob_idx], cam, all_probs[best_prob_idx])
         fig_attn    = plot_se_attention(_se_weights.get("layer3", np.zeros(128)))
         fig_met     = plot_metrics()
 
-        # 7. Result
+        # Result label
         label_dict = {
-            "🔴 ABNORMAL (Хэвийн бус)": round(prob_abn, 4),
-            "🟢 NORMAL (Хэвийн)":       round(prob_nor, 4),
+            "🔴 ABNORMAL": round(final_prob, 4),
+            "🟢 NORMAL":   round(1.0 - final_prob, 4),
         }
 
-        conf_pct  = prob_abn * 100 if abnormal else prob_nor * 100
+        conf_pct  = final_prob * 100 if abnormal else (1.0 - final_prob) * 100
         conf_str  = f"{conf_pct:.1f}%"
-        score_str = f"logit: {logit:.4f}  sigmoid: {prob_abn:.4f}  threshold: {THRESHOLD}"
+        score_str = (
+            f"mean prob: {final_prob:.4f}  |  "
+            f"segments: {n_segs}  |  "
+            f"threshold: {THRESHOLD}"
+        )
 
-        return fig_wave, fig_mel, fig_gradcam, fig_attn, fig_met, label_dict, conf_str, score_str
+        return (
+            None,          # quality fail fig (None = no error)
+            fig_wave,
+            fig_mel,
+            fig_gradcam,
+            fig_attn,
+            fig_met,
+            label_dict,
+            conf_str,
+            score_str,
+            quality_text
+        )
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         return (
-            None, None, None, None, None,
-            {"❌ Error": 1.0}, "N/A", str(e)[:120]
+            None, None, None, None, None, None,
+            {"❌ Error": 1.0}, "N/A", str(e)[:120], ""
         )
+
+
+# ══════════════════════════════════════════════════════════════════
+# POPUP HTML + JS
+# ══════════════════════════════════════════════════════════════════
+POPUP_HTML = """
+<div id="pcg-popup-overlay" style="
+    display:flex; position:fixed; inset:0; z-index:9999;
+    background:rgba(0,0,0,0.55); align-items:center; justify-content:center;">
+  <div style="
+      background:#fff; border-radius:14px; padding:32px 36px;
+      max-width:520px; width:90%; box-shadow:0 8px 40px rgba(0,0,0,0.25);
+      font-family:'IBM Plex Sans',sans-serif;">
+    <h2 style="margin:0 0 16px; color:#1D4ED8; font-size:1.25rem;">
+      🫀 PCG Recording Requirements
+    </h2>
+    <table style="width:100%; border-collapse:collapse; font-size:0.95rem;">
+      <tr><td style="padding:6px 8px;">✅</td><td>Digital stethoscope or electronic auscultation device</td></tr>
+      <tr><td style="padding:6px 8px;">✅</td><td>Minimum <strong>2 seconds</strong> duration</td></tr>
+      <tr><td style="padding:6px 8px;">✅</td><td>Any sample rate — auto-resampled to 2,000 Hz</td></tr>
+      <tr><td style="padding:6px 8px;">✅</td><td><strong>.wav</strong> format recommended</td></tr>
+      <tr><td style="padding:6px 8px; color:#DC2626;">❌</td><td>Ambient noise, music, or voice recordings</td></tr>
+      <tr><td style="padding:6px 8px; color:#DC2626;">❌</td><td>Silent, clipped, or corrupted files</td></tr>
+      <tr><td style="padding:6px 8px; color:#DC2626;">❌</td><td>Recordings shorter than 2 seconds</td></tr>
+    </table>
+    <p style="margin:16px 0 0; font-size:0.85rem; color:#64748B;">
+      The system performs 5-stage quality validation before analysis.
+      Invalid recordings will be rejected with a detailed report.
+    </p>
+    <button onclick="document.getElementById('pcg-popup-overlay').style.display='none'"
+      style="
+        margin-top:20px; width:100%; padding:12px;
+        background:#1D4ED8; color:#fff; border:none;
+        border-radius:8px; font-size:1rem; font-weight:600;
+        cursor:pointer; letter-spacing:0.02em;">
+      I Understand — Proceed to Upload
+    </button>
+  </div>
+</div>
+"""
 
 
 # ══════════════════════════════════════════════════════════════════
 # GRADIO UI
 # ══════════════════════════════════════════════════════════════════
 with gr.Blocks(
-    theme=gr.themes.Soft(
+    theme=gr.themes.Default(
         primary_hue="blue",
-        secondary_hue="indigo",
-        font=gr.themes.GoogleFont("IBM Plex Sans")
+        secondary_hue="slate",
+        font=gr.themes.GoogleFont("IBM Plex Sans"),
+        font_mono=gr.themes.GoogleFont("IBM Plex Mono"),
     ),
-    title="PCG Heart Sound Classifier"
+    title="PCG Heart Sound Classifier",
+    css="""
+        .gradio-container { max-width: 1200px !important; }
+        .tab-nav button { font-weight: 600; font-size: 0.95rem; }
+        footer { display: none !important; }
+    """
 ) as demo:
 
-    gr.Markdown("""
-    # 🫀 Abnormal Heart Sound Detection System
-    **ResNet2D + SE Attention + Mel-Spectrogram** with Grad-CAM interpretability
+    # Popup shown on load
+    gr.HTML(POPUP_HTML)
 
-    > PhysioNet/CinC 2016 PCG Dataset — 3,240 recordings | SR: 2,000 Hz
-    > Bachelor Thesis — Г.Хишигжаргал, 2026
-    ---
+    # Header
+    gr.Markdown("""
+    # 🫀 Abnormal Heart Sound Detection
+    **ResNet2D + SE Attention + Mel-Spectrogram** &nbsp;|&nbsp;
+    PhysioNet/CinC 2016 · 3,240 recordings · SR 2,000 Hz &nbsp;|&nbsp;
+    Bachelor Thesis — Г.Хишигжаргал, 2026
     """)
 
+    # Input row
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("### 📂 Input")
             audio_input = gr.Audio(
-                label="Upload PCG Recording (.wav)",
+                label="PCG Recording (.wav)",
                 type="filepath",
                 sources=["upload", "microphone"]
             )
-            predict_btn = gr.Button("🔍 Analyze", variant="primary", size="lg")
-            gr.Markdown("""
-            **Requirements:**
-            - `.wav` format, minimum 2 seconds
-            - Any sample rate (auto-resampled to 2,000 Hz)
-            - PCG / digital stethoscope recording recommended
-            - Live microphone recording also supported
-            """)
+            analyze_btn = gr.Button("Analyze Recording", variant="primary", size="lg")
 
         with gr.Column(scale=1):
-            gr.Markdown("### 📊 Classification Result")
-            result_label = gr.Label(label="Prediction", num_top_classes=2)
+            result_label = gr.Label(label="Classification", num_top_classes=2)
             with gr.Row():
-                confidence_out = gr.Textbox(
-                    label="Confidence", interactive=False, scale=1
-                )
-                score_out = gr.Textbox(
-                    label="Raw Score", interactive=False, scale=2
-                )
+                confidence_out = gr.Textbox(label="Confidence",  interactive=False, scale=1)
+                score_out      = gr.Textbox(label="Aggregation", interactive=False, scale=2)
 
-    gr.Markdown("---\n### 📈 Signal Visualization")
-    with gr.Row():
-        fig_wave_out = gr.Plot(label="Waveform — Highest RMS Segment")
-        fig_mel_out  = gr.Plot(label="Mel-Spectrogram — Model Input (128×16)")
+    # Tabs
+    with gr.Tabs():
 
+        with gr.Tab("📋 Diagnosis"):
+            quality_fail_plot = gr.Plot(label="Quality Report", visible=True)
+            with gr.Row():
+                fig_wave_out = gr.Plot(label="Waveform — Highest RMS Segment")
+                fig_mel_out  = gr.Plot(label="Mel-Spectrogram — Model Input (128×16)")
+            quality_text_out = gr.Markdown(label="Quality Details")
+
+        with gr.Tab("🔬 Explainability"):
+            gr.Markdown("""
+            **Grad-CAM** shows *where in time and frequency* the model detected abnormality.
+            Computed on the segment with the highest abnormality probability.
+
+            **SE Attention** shows *which mel frequency channels* Layer 3 weighted most heavily.
+            These correspond to specific cardiac sound bands (S1, S2, murmurs).
+            """)
+            fig_gradcam_out = gr.Plot(label="Grad-CAM — Temporal-Frequency Heatmap")
+            fig_attn_out    = gr.Plot(label="SE Channel Attention Weights — Layer 3")
+
+        with gr.Tab("📊 Model Info"):
+            gr.Markdown("""
+            ### Architecture
+            **ResNet2D + Squeeze-and-Excitation Attention**
+            - Input: Mel-spectrogram (1 × 128 × 16)
+            - Stem: Conv2D(1→32) + BN + ReLU
+            - Layer 1: BasicBlock(32→32) + SEBlock
+            - Layer 2: BasicBlock(32→64, stride=2) + SEBlock
+            - Layer 3: BasicBlock(64→128, stride=2) + SEBlock
+            - Output: AdaptiveAvgPool → Dropout → FC(128→1)
+
+            ### Training
+            - Dataset: PhysioNet/CinC 2016, 3,240 recordings, 68,104 segments
+            - Split: 70% train / 15% val / 15% test (stratified)
+            - Loss: BCEWithLogitsLoss (pos_weight=3.25)
+            - Optimizer: Adam (lr=1e-3, weight_decay=1e-4)
+            - Threshold: **0.35** (optimized for recall on validation set)
+
+            ### Inference
+            - All overlapping 2-second segments are classified
+            - Final probability = mean across all segments
+            - Grad-CAM computed on highest-probability segment
+            """)
+            fig_metrics_out = gr.Plot(label="Test Set Performance")
+
+    # Footer
     gr.Markdown("""
-    ---
-    ### 🔥 Grad-CAM — Temporal-Frequency Interpretability
-    Shows **where in time and frequency** the model found evidence of abnormality.
-    Red regions indicate the most discriminative areas of the mel-spectrogram.
-    This corresponds to specific cardiac phases (e.g., systolic murmur, S3/S4 sounds).
+    <div style='text-align:center; color:#94A3B8; font-size:0.8rem; margin-top:8px;'>
+    Department of Computer Science · MUST · 2026 &nbsp;·&nbsp;
+    Accuracy 95.24% &nbsp;·&nbsp; F1 90.00% &nbsp;·&nbsp;
+    AUC 98.92% &nbsp;·&nbsp; Recall 91.05%
+    </div>
     """)
-    fig_gradcam_out = gr.Plot(label="Grad-CAM Heatmap Overlay")
 
-    gr.Markdown("""
-    ---
-    ### 🧠 SE Attention — Channel Importance
-    Shows which mel frequency channels Layer 3 attended to.
-    **Red bars** = Top-20 most active channels across the entire segment.
-    """)
-    fig_attn_out = gr.Plot(label="SE Channel Attention Weights — Layer 3")
-
-    gr.Markdown("---\n### 📋 Model Performance (Test Set)")
-    fig_metrics_out = gr.Plot(label="Evaluation Metrics")
-
-    predict_btn.click(
+    # Event
+    analyze_btn.click(
         fn=predict,
         inputs=[audio_input],
         outputs=[
-            fig_wave_out, fig_mel_out, fig_gradcam_out,
-            fig_attn_out, fig_metrics_out,
-            result_label, confidence_out, score_out
+            quality_fail_plot,
+            fig_wave_out,
+            fig_mel_out,
+            fig_gradcam_out,
+            fig_attn_out,
+            fig_metrics_out,
+            result_label,
+            confidence_out,
+            score_out,
+            quality_text_out,
         ]
     )
-
-    gr.Markdown("""
-    ---
-    <div style='text-align:center; color:#888; font-size:12px;'>
-    Department of Computer Science | MUST | 2026
-    &nbsp;|&nbsp; Accuracy: 95.24%
-    &nbsp;|&nbsp; F1: 90.00%
-    &nbsp;|&nbsp; AUC: 98.92%
-    &nbsp;|&nbsp; Recall: 91.05%
-    &nbsp;|&nbsp; Threshold: 0.35
-    </div>
-    """)
 
 
 # ══════════════════════════════════════════════════════════════════
